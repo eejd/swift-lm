@@ -19,6 +19,9 @@ let package = Package(
         .package(path: "./mlx-swift-lm"),
         // HuggingFace tokenizers + model download
         .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.2.0")),
+        // Chat-template values (the order-preserving tool schemas, OrderedToolSchemas.swift).
+        // Already a dependency of swift-transformers; named here because SwiftLM imports it.
+        .package(url: "https://github.com/huggingface/swift-jinja", from: "2.0.0"),
         // Lightweight HTTP server (Apple-backed Swift server project)
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.0.0"),
         // Async argument parser (for CLI flags: --model, --port)
@@ -39,6 +42,7 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
                 .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Jinja", package: "swift-jinja"),
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
@@ -130,7 +134,7 @@ let package = Package(
         ),
         .testTarget(
             name: "SwiftLMTests",
-            dependencies: ["SwiftLM", "MLXInferenceCore", "DFlash"]
+            dependencies: ["SwiftLM", "MLXInferenceCore", "DFlash", .product(name: "Jinja", package: "swift-jinja")]
         )
     ]
 )

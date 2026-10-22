@@ -2607,7 +2607,16 @@ func handleChatCompletion(
 
     // The Jinja template evaluates `not enable_thinking | default(false)`. If we pass nil instead of
     // true, it evaluates to false and still breaks. We MUST explicitly pass the boolean.
-    let templateContext: [String: any Sendable] = ["enable_thinking": enableThinking]
+    var templateContext: [String: any Sendable] = ["enable_thinking": enableThinking]
+    // The template renders each tool with `tojson`. `toolSpecs` are Swift dictionaries and
+    // swift-jinja sorts their keys, so the model would see an alphabetized schema, not the
+    // request's (eejd/swift-lm#5, #15). The same tools in request order replace them in the
+    // template context; `toolSpecs` still drive template selection and argument parsing.
+    if toolSpecs?.isEmpty == false,
+        let orderedTools = OrderedToolSchemas.tools(inRequestBody: bodyData)
+    {
+        templateContext["tools"] = orderedTools
+    }
     let userInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: templateContext)
     print("[Server Debug] Created UserInput with \(userInput.images.count) images and \(userInput.audios.count) audio inputs.")
     let lmInput = try await container.prepare(input: userInput)
