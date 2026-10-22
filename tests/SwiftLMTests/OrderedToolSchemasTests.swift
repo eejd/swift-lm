@@ -60,9 +60,24 @@ final class OrderedToolSchemasTests: XCTestCase {
         XCTAssertTrue(rendered.hasPrefix(#"{"function": {"description""#), rendered)
     }
 
-    func testRepeatedKeyKeepsFirstPositionAndLastValue() throws {
+    func testRepeatedKeyKeepsFirstValueLikeTheDecoder() throws {
         let value = try OrderedToolSchemas.parse(Data(#"{"b": 1, "a": 2, "b": 3}"#.utf8))
-        XCTAssertEqual(try dumps(value), #"{"b": 3, "a": 2}"#)
+        XCTAssertEqual(try dumps(value), #"{"b": 1, "a": 2}"#)
+        // The decoder that builds the parser's argument schemas reads the same value.
+        let decoded = try JSONDecoder().decode([String: Int].self, from: Data(#"{"b": 1, "a": 2, "b": 3}"#.utf8))
+        XCTAssertEqual(decoded["b"], 1)
+    }
+
+    func testDuplicateToolsMemberAndDuplicateSchemaKeyAgreeWithTheDecoder() throws {
+        let data = Data(#"{"model": "m", "messages": [{"role": "user", "content": "hi"}], "tools": [{"type": "function", "function": {"name": "first", "parameters": {"type": "object", "type": "array", "properties": {}}}}], "tools": [{"type": "function", "function": {"name": "second"}}]}"#.utf8)
+        let decoded = try JSONDecoder().decode(ChatCompletionRequest.self, from: data)
+        let ordered = try items(OrderedToolSchemas.tools(inRequestBody: data))
+        XCTAssertEqual(decoded.tools?.map(\.function.name), ["first"])
+        XCTAssertEqual(ordered.count, 1)
+        let text = try dumps(ordered[0])
+        XCTAssertTrue(text.contains(#""name": "first""#), text)
+        XCTAssertTrue(text.contains(#""type": "object""#) && !text.contains(#""type": "array""#), text)
+        XCTAssertEqual(decoded.tools?.first?.function.parameters?["type"]?.value as? String, "object")
     }
 
     // MARK: - The request body
@@ -82,7 +97,7 @@ final class OrderedToolSchemasTests: XCTestCase {
         XCTAssertNil(OrderedToolSchemas.tools(inRequestBody: Data("{}".utf8)))
     }
 
-    func testMalformedBodyIsNilNotACrash() {
+    func testMalformedBodyIsNilNotACrash() throws {
         for text in [#"{"tools": [{"a": }]}"#, #"{"tools": [1, 2"#, #"{"tools": "#, "", "[]",
             #"{"tools": [{"a": "\u12"}]}"#, #"{"tools": ["\ud83d"]}"#]
         {
@@ -90,7 +105,7 @@ final class OrderedToolSchemasTests: XCTestCase {
         }
         let deep = String(repeating: "[", count: 400) + String(repeating: "]", count: 400)
         XCTAssertNil(OrderedToolSchemas.tools(inRequestBody: Data("{\"tools\": \(deep)}".utf8)))
-        XCTAssertNil(OrderedToolSchemas.tools(inRequestBody: Data("{\"x\": \(deep), \"tools\": []}".utf8)))
+        XCTAssertEqual(try items(OrderedToolSchemas.tools(inRequestBody: Data("{\"x\": \(deep), \"tools\": []}".utf8))).count, 0)
     }
 
     func testRequestToolsAgreeWithTheDecodedTools() throws {
@@ -110,19 +125,62 @@ final class OrderedToolSchemasTests: XCTestCase {
 
     func testScalarsAndStrings() throws {
         let value = try OrderedToolSchemas.parse(
-            Data(#"{"i": -7, "d": 1.5, "e": 1e3, "big": 12345678901234567890, "t": true, "f": false, "n": null, "s": "a\"b\\c\/d\n\t\u00e9\ud83d\ude00 \u2028", "u": "é😀"}"#.utf8))
+            Data(#"{"i": -7, "d": 1.5, "e": 1e3, "t": true, "f": false, "n": null, "s": "a\"b\\c\/d\n\t\u00e9\ud83d\ude00 \u2028", "u": "é😀"}"#.utf8))
         guard case .object(let object) = value else { return XCTFail() }
         XCTAssertEqual(object[.string("i")], .int(-7))
         XCTAssertEqual(object[.string("d")], .double(1.5))
         XCTAssertEqual(object[.string("e")], .double(1000))
-        XCTAssertEqual(object[.string("big")], .double(12345678901234567890))
         XCTAssertEqual(object[.string("t")], .boolean(true))
         XCTAssertEqual(object[.string("f")], .boolean(false))
         XCTAssertEqual(object[.string("n")], .null)
         XCTAssertEqual(object[.string("s")], .string("a\"b\\c/d\n\té😀 \u{2028}"))
         XCTAssertEqual(object[.string("u")], .string("é😀"))
         XCTAssertEqual(
-            Array(object.keys), ["i", "d", "e", "big", "t", "f", "n", "s", "u"].map { ObjectKey.string($0) })
+            Array(object.keys), ["i", "d", "e", "t", "f", "n", "s", "u"].map { ObjectKey.string($0) })
+    }
+
+    func testBodiesTheDecoderAcceptsInOtherEncodingsAreRead() throws {
+        let json = "{\"model\": \"m\", \"messages\": [{\"role\": \"user\", \"content\": \"h\u{e9}\"}], \"tools\": [\(Self.search)]}"
+        let utf8 = Data(json.utf8)
+        let bom = Data([0xEF, 0xBB, 0xBF]) + utf8
+        let utf16 = json.data(using: .utf16)!                       // BOM, native order
+        let utf16BE = json.data(using: .utf16BigEndian)!            // no BOM
+        let utf16LE = json.data(using: .utf16LittleEndian)!         // no BOM
+        let utf32BE = json.data(using: .utf32BigEndian)!
+        for (name, body) in [("utf8", utf8), ("utf8 BOM", bom), ("utf16 BOM", utf16), ("utf16 BE", utf16BE),
+            ("utf16 LE", utf16LE), ("utf32 BE", utf32BE)]
+        {
+            // The decoder accepts it (it does not accept a UTF-32 BOM, which is why none is tested) ...
+            XCTAssertNoThrow(try JSONDecoder().decode(ChatCompletionRequest.self, from: body), name)
+            // ... so the reader must too, or the model would get the sorted schema.
+            guard case .ordered(let tools) = OrderedToolSchemas.read(inRequestBody: body) else {
+                XCTFail("\(name): not read: \(OrderedToolSchemas.read(inRequestBody: body))")
+                continue
+            }
+            XCTAssertEqual(try items(tools).map(dumps), [Self.search], name)
+        }
+    }
+
+    func testDeeplyNestedOtherMembersDoNotHideTheTools() throws {
+        // The decoder allows 512 levels; a member the reader only skips has no limit of its own.
+        let deep = String(repeating: "[", count: 500) + String(repeating: "]", count: 500)
+        let data = Data("{\"x\": \(deep), \"tools\": [\(Self.search)]}".utf8)
+        XCTAssertEqual(try items(OrderedToolSchemas.tools(inRequestBody: data)).map(dumps), [Self.search])
+    }
+
+    func testUnreadableToolsAreReportedNotHidden() {
+        // A tool schema nested deeper than the value reader's bound: reported, not silently sorted.
+        let deep = String(repeating: "[", count: 200) + String(repeating: "]", count: 200)
+        let data = Data("{\"tools\": [{\"x\": \(deep)}]}".utf8)
+        guard case .unreadable = OrderedToolSchemas.read(inRequestBody: data) else {
+            return XCTFail("expected .unreadable, got \(OrderedToolSchemas.read(inRequestBody: data))")
+        }
+        guard case .absent = OrderedToolSchemas.read(inRequestBody: Data(#"{"model": "m"}"#.utf8)) else {
+            return XCTFail("expected .absent")
+        }
+        guard case .unreadable = OrderedToolSchemas.read(inRequestBody: Data(#"{"tools": [1,"#.utf8)) else {
+            return XCTFail("expected .unreadable for a truncated body")
+        }
     }
 
     func testNullsOfTheSchemaAreKept() throws {

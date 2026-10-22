@@ -2612,10 +2612,16 @@ func handleChatCompletion(
     // swift-jinja sorts their keys, so the model would see an alphabetized schema, not the
     // request's (eejd/swift-lm#5, #15). The same tools in request order replace them in the
     // template context; `toolSpecs` still drive template selection and argument parsing.
-    if toolSpecs?.isEmpty == false,
-        let orderedTools = OrderedToolSchemas.tools(inRequestBody: bodyData)
-    {
-        templateContext["tools"] = orderedTools
+    if toolSpecs?.isEmpty == false {
+        switch OrderedToolSchemas.read(inRequestBody: bodyData) {
+        case .ordered(let orderedTools):
+            templateContext["tools"] = orderedTools
+        case .absent:
+            // Cannot happen for a body whose `tools` the decoder read.
+            print("[SwiftLM] ⚠️  tool schemas rendered in alphabetical key order, not the request's (no tools array found); this changes the prompt (eejd/swift-lm#15)")
+        case .unreadable(let why):
+            print("[SwiftLM] ⚠️  tool schemas rendered in alphabetical key order, not the request's (\(why)); this changes the prompt (eejd/swift-lm#15)")
+        }
     }
     let userInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: templateContext)
     print("[Server Debug] Created UserInput with \(userInput.images.count) images and \(userInput.audios.count) audio inputs.")

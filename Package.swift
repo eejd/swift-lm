@@ -21,7 +21,7 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.2.0")),
         // Chat-template values (the order-preserving tool schemas, OrderedToolSchemas.swift).
         // Already a dependency of swift-transformers; named here because SwiftLM imports it.
-        .package(url: "https://github.com/huggingface/swift-jinja", from: "2.0.0"),
+        .package(url: "https://github.com/huggingface/swift-jinja", from: "2.5.0"),
         // Lightweight HTTP server (Apple-backed Swift server project)
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.0.0"),
         // Async argument parser (for CLI flags: --model, --port)

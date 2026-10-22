@@ -17,17 +17,43 @@ import Jinja
 /// unchanged, and applies the additional context after `tools`, so it replaces the sorted copy.
 enum OrderedToolSchemas {
 
-    /// The `tools` array of a chat completion request body, or `nil` when the body has none
-    /// (or is not JSON this reader understands: the caller then keeps the decoded, sorted tools).
+    /// What reading the request's `tools` gave.
+    enum Reading {
+        /// The `tools` array, objects in the order the client wrote them.
+        case ordered(Value)
+        /// The body has no `tools` array.
+        case absent
+        /// The body has a `tools` member this reader could not read although the decoder
+        /// accepted the request; the caller keeps the decoded, alphabetized tools and says so.
+        case unreadable(String)
+    }
+
+    /// The `tools` array of a chat completion request body.
+    static func read(inRequestBody body: Data) -> Reading {
+        guard let bytes = utf8(body) else { return .unreadable("unrecognized text encoding") }
+        var reader = Reader(bytes: bytes)
+        do {
+            guard let value = try reader.member("tools"), case .array = value else {
+                return .absent
+            }
+            return .ordered(value)
+        } catch let error as ParseError {
+            return .unreadable("offset \(error.offset)")
+        } catch {
+            return .unreadable("\(error)")
+        }
+    }
+
+    /// The ordered `tools`, or `nil` when the body has none or they are unreadable.
     static func tools(inRequestBody body: Data) -> Value? {
-        var reader = Reader(bytes: [UInt8](body))
-        guard let value = try? reader.member("tools"), case .array = value else { return nil }
-        return value
+        if case .ordered(let value) = read(inRequestBody: body) { return value }
+        return nil
     }
 
     /// Reads one JSON document into `Value`, objects as insertion-ordered dictionaries.
     static func parse(_ body: Data) throws -> Value {
-        var reader = Reader(bytes: [UInt8](body))
+        guard let bytes = utf8(body) else { throw ParseError(offset: 0) }
+        var reader = Reader(bytes: bytes)
         let value = try reader.value(depth: 0)
         reader.skipWhitespace()
         guard reader.index == reader.bytes.count else { throw ParseError(offset: reader.index) }
@@ -38,7 +64,34 @@ enum OrderedToolSchemas {
         let offset: Int
     }
 
-    /// A request nests a tool schema a few levels; this bounds recursion on hostile input.
+    /// The request body as UTF-8 bytes. `JSONDecoder` accepts a UTF-8 byte order mark and
+    /// UTF-16/UTF-32 bodies (RFC 8259 detection by BOM, else by the position of the NULs of
+    /// the first four bytes); a body it accepted must be read the same way here.
+    static func utf8(_ body: Data) -> [UInt8]? {
+        let b = [UInt8](body.prefix(4))
+        func decode(_ encoding: String.Encoding, dropping: Int) -> [UInt8]? {
+            String(data: body.dropFirst(dropping), encoding: encoding).map { Array($0.utf8) }
+        }
+        if b.count >= 4 {
+            if b == [0xFF, 0xFE, 0x00, 0x00] { return decode(.utf32LittleEndian, dropping: 4) }
+            if b == [0x00, 0x00, 0xFE, 0xFF] { return decode(.utf32BigEndian, dropping: 4) }
+            if b[0] == 0, b[1] == 0, b[2] == 0, b[3] != 0 { return decode(.utf32BigEndian, dropping: 0) }
+            if b[0] != 0, b[1] == 0, b[2] == 0, b[3] == 0 { return decode(.utf32LittleEndian, dropping: 0) }
+        }
+        if b.count >= 2 {
+            if b[0] == 0xFE, b[1] == 0xFF { return decode(.utf16BigEndian, dropping: 2) }
+            if b[0] == 0xFF, b[1] == 0xFE { return decode(.utf16LittleEndian, dropping: 2) }
+            if b[0] == 0, b[1] != 0 { return decode(.utf16BigEndian, dropping: 0) }
+            if b[0] != 0, b[1] == 0 { return decode(.utf16LittleEndian, dropping: 0) }
+        }
+        if b.count >= 3, b[0] == 0xEF, b[1] == 0xBB, b[2] == 0xBF { return [UInt8](body.dropFirst(3)) }
+        return [UInt8](body)
+    }
+
+    /// A tool schema nests a few levels; this bounds the recursion of building values (the
+    /// decoder allows 512 levels and recurses as deeply). Members the reader only skips are
+    /// stepped over iteratively and have no limit of their own; a `tools` array nested deeper
+    /// than this is reported by `read` and rendered from the decoded tools.
     private static let maximumDepth = 128
 
     private struct Reader {
@@ -97,9 +150,11 @@ enum OrderedToolSchemas {
                     let key = try string()
                     skipWhitespace()
                     try expect(UInt8(ascii: ":"))
-                    // A repeated key keeps its first position and takes the last value,
-                    // as a Python dict does.
-                    object[.string(key)] = try value(depth: depth + 1)
+                    // A repeated key keeps its first value, as the `JSONDecoder` that builds the
+                    // parser's argument schemas does, so the model and the parser read one schema.
+                    // (Python's `json.loads` keeps the last; no client sends a schema this way.)
+                    let item = try value(depth: depth + 1)
+                    if object[.string(key)] == nil { object[.string(key)] = item }
                     skipWhitespace()
                     switch next() {
                     case UInt8(ascii: ","): continue
@@ -143,7 +198,7 @@ enum OrderedToolSchemas {
         /// Steps over one value without building it. The document was already accepted by
         /// `JSONDecoder`, so this only has to find where the value ends.
         mutating func skipValue(depth: Int) throws {
-            guard depth <= OrderedToolSchemas.maximumDepth else { throw ParseError(offset: index) }
+            guard depth <= 4096 else { throw ParseError(offset: index) }
             skipWhitespace()
             guard let byte = peek() else { throw ParseError(offset: index) }
             switch byte {
@@ -163,7 +218,7 @@ enum OrderedToolSchemas {
                     }
                     index += 1
                     if nesting == 0 { return }
-                    if nesting > OrderedToolSchemas.maximumDepth { throw ParseError(offset: index) }
+                    if nesting > 4096 { throw ParseError(offset: index) }
                 }
                 throw ParseError(offset: index)
             case UInt8(ascii: "\""):
@@ -251,7 +306,9 @@ enum OrderedToolSchemas {
         // MARK: Numbers and literals
 
         /// An integer literal is an `Int` (a Python `int`), one with a fraction or an exponent
-        /// a `Double`; an integer outside `Int` becomes a `Double`.
+        /// a `Double`. An integer outside `Int64` becomes a `Double` and renders in exponent form
+        /// (`1.2345678901234568e+20`, where Python prints all digits): swift-jinja has no big
+        /// integer, and a tool schema does not carry one in practice.
         mutating func number() throws -> Value {
             let start = index
             while let byte = peek(),
