@@ -147,8 +147,10 @@ final class OrderedToolSchemasTests: XCTestCase {
         let utf16BE = json.data(using: .utf16BigEndian)!            // no BOM
         let utf16LE = json.data(using: .utf16LittleEndian)!         // no BOM
         let utf32BE = json.data(using: .utf32BigEndian)!
+        let utf32LE = json.data(using: .utf32LittleEndian)!         // no BOM
         for (name, body) in [("utf8", utf8), ("utf8 BOM", bom), ("utf16 BOM", utf16), ("utf16 BE", utf16BE),
-            ("utf16 LE", utf16LE), ("utf32 BE", utf32BE)]
+            ("utf16 LE", utf16LE), ("utf32 BE", utf32BE), ("utf32 LE", utf32LE),
+            ("utf16 BE BOM", Data([0xFE, 0xFF]) + utf16BE), ("utf16 LE BOM", Data([0xFF, 0xFE]) + utf16LE)]
         {
             // The decoder accepts it (it does not accept a UTF-32 BOM, which is why none is tested) ...
             XCTAssertNoThrow(try JSONDecoder().decode(ChatCompletionRequest.self, from: body), name)
