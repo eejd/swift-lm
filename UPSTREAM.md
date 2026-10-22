@@ -30,6 +30,8 @@ The tag is one release unit with `eejd/mlx-swift-lm` `v3.32.3-local01` (library 
 
 SwiftLM has no version surface (no `--version`, no version in the startup banner or the HTTP endpoints), so the port does not stamp `<base>+local<NN>`; it asserts after the build that the binary contains both fork changes.
 
+The topic merge on `local` (`Merge topic/tool-calls-declared-tools into local (#10)`) carries no `Source:`/`UPSTREAM:` trailers, unlike the `local` merges of `eejd/py-mlx-lm`. The topic is our own work, not adopted from another repo, so ADR-0008's `Source:` rule does not apply; the topic row above carries the same information. History is not rewritten.
+
 ## Origin
 
 Developed 2026-10-22 from the T0 engine runs of eejd/py-quantbench (#217, #287) against SwiftLM b861.
