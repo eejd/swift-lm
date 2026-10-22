@@ -19,6 +19,22 @@ None.
 
 `topic/tool-schema-key-order`: the request's `tools` reached the chat template as Swift dictionaries and swift-jinja sorts dictionary keys, so the model saw an alphabetized tool schema (`{"function": {"description": ..., "name": ...}, "type": "function"}`, `"enum"` before `"type"`) and a prompt of 4 tokens fewer than every Python engine's on the T0 tool prompts. `OrderedToolSchemas` reads the order of the `tools` member from the request bytes into `Jinja.Value` objects (insertion ordered) and `handleChatCompletion` passes them as `additionalContext["tools"]`, which swift-transformers applies after, and converts with `Value(any:)` that passes a `Value` through. No `mlx-swift-lm` change. Adds `swift-jinja` (already a dependency of swift-transformers, same pin) to `Package.swift` as a direct dependency of the `SwiftLM` and `SwiftLMTests` targets: a port that builds this topic needs no new distfile. Behavior change: JSON `null`s in a tool schema (`"default": null`) are now kept in the rendered schema (the old path dropped them: the upstream issue #168 workaround for a conversion error). Tested to render without error and, for MiniCPM5 and Qwen3.5, as the reference engines do; other templates render them too but not all as Python would (gpt-oss: `// default: ,` for a null default, where Python Jinja raises): not verified per family. Integers beyond Int64 render in exponent form; repeated keys keep the first value (as the decoder does); a request body the reader cannot read is rendered from the decoded (alphabetized) tools with a log line. Message `tool_calls` arguments of the history are not covered (eejd/swift-lm#6).
 
+## Tags
+
+Release tags on `local` are `v<base>-local<NN>` (docs/development-model.md, ADR-0008 §2). `<base>` is the last upstream release `local` contains. SharpAI/SwiftLM's releases are build counters tagged `b<N>`; the MacPorts port `swiftlm` calls its version the bare counter (`861`), so `<base>` is the counter and the tags are `v861-local01`, not `vb861-local01`.
+
+| Tag | Commit | Contents | Checked |
+|---|---|---|---|
+| `v861-local01` (annotated, tag object `59d3536e119456c6cf5cfcc58468977f3ac531df`) | `b895e812e096ef0d260220e2dce8dc24869c754d` (`local` after the merge of #10, 2026-10-22) | upstream `b861` (`d2fae1b`) + `UPSTREAM.md` + `topic/tool-calls-declared-tools`. Against `b861` the tag changes `Sources/SwiftLM/Server.swift`, `tests/SwiftLMTests/DeclaredToolsTests.swift` and `UPSTREAM.md`; `Package.swift` and `Package.resolved` are unchanged, so the port's vendored dependency list is unchanged. The tag's `UPSTREAM.md` is the one before this Tags section (documentation only). | scratch build and test run mirroring the port `swiftlm-local` (see eejd/macports-ports-local); live probes in eejd/py-quantbench#292 on the same Sources |
+
+The tag is one release unit with `eejd/mlx-swift-lm` `v3.32.3-local01` (library topics #1 and #2): the server change on its own, on the old library, regresses JSON answers when no tools are offered (see "Merge and port order" above). The port `swiftlm-local` takes both tags as distfiles.
+
+**The `mlx-swift-lm` gitlink stays at `SharpAI/mlx-swift-lm@4d76a2e`.** The port never fetches it (it deletes the empty submodule stub of the archive and takes the library from its own distfile), and `.gitmodules` points at `SharpAI/mlx-swift-lm`, which does not have `eejd/mlx-swift-lm`'s commits: a gitlink to one of them could not be fetched by `git submodule update`.
+
+SwiftLM has no version surface (no `--version`, no version in the startup banner or the HTTP endpoints), so the port does not stamp `<base>+local<NN>`; it asserts after the build that the binary contains both fork changes.
+
+The topic merge on `local` (`Merge topic/tool-calls-declared-tools into local (#10)`) carries no `Source:`/`UPSTREAM:` trailers, unlike the `local` merges of `eejd/py-mlx-lm`. The topic is our own work, not adopted from another repo, so ADR-0008's `Source:` rule does not apply; the topic row above carries the same information. History is not rewritten.
+
 ## Origin
 
 Developed 2026-10-22 from the T0 engine runs of eejd/py-quantbench (#217, #287) against SwiftLM b861.
