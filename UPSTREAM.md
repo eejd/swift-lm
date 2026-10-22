@@ -1,0 +1,21 @@
+# Upstream and adopted work (`local` branch)
+
+Primary upstream: `SharpAI/SwiftLM` (GitHub fork parent). Secondary upstreams tracked: none.
+
+`local` is upstream's release tag `b861` (the version of the MacPorts port `swiftlm`) plus the topic branches below. `main` mirrors `SharpAI/SwiftLM` `main` (fast-forward only).
+
+## Adopted from other repos
+
+None.
+
+## Topic branches
+
+| Topic | Upstream PR | Status |
+|---|---|---|
+| `topic/tool-calls-declared-tools` | none yet | not-submitted (no upstream contact before the quantbench + agentbench soak, ADR-0008); tracked in eejd/swift-lm#7, #8, #9. `git apply --check` of the Sources diff passes against `SharpAI/SwiftLM` `main` (`ee816ed`); it was not built there |
+
+`topic/tool-calls-declared-tools`: every generation call of the chat endpoint handed the tool-call parser no tools (`tools: nil`), and the raw-completion endpoint the same. For the parser `nil` means "no schema to check against": it accepts any function name and reads every argument as text. The request's `tools` are now passed on every path, `[]` when the request has none, and `/v1/completions` passes `[]`. This fixes JSON answers with a `name` key returned as `tool_calls` (#9) and integer/boolean/array/object arguments returned as strings (#7: Qwen3.5-4B). It needs two changes in `mlx-swift-lm` (`eejd/mlx-swift-lm`: `topic/declared-tools-authoritative`, for #9, and `topic/minicpm5-tool-call-format`, for #8): the server change alone types arguments and stops extraction for formats whose parser is already tool-aware, not for the Llama 3 JSON parser and not for MiniCPM5. The pinned `mlx-swift-lm` submodule (`SharpAI/mlx-swift-lm@4d76a2e`) is unchanged on this branch; the port takes `mlx-swift-lm` from a distfile.
+
+## Origin
+
+Developed 2026-10-22 from the T0 engine runs of eejd/py-quantbench (#217, #287) against SwiftLM b861.
