@@ -2557,16 +2557,10 @@ func handleChatCompletion(
     }
 
     // Convert OpenAI tools format → [String: any Sendable] for UserInput
-    let toolSpecs: [[String: any Sendable]]? = chatReq.tools?.map { tool in
-        var spec: [String: any Sendable] = ["type": tool.type]
-        var fn: [String: any Sendable] = ["name": tool.function.name]
-        if let desc = tool.function.description { fn["description"] = desc }
-        if let params = tool.function.parameters {
-            fn["parameters"] = params.mapValues { $0.value }
-        }
-        spec["function"] = fn
-        return spec
-    }
+    let toolSpecs = requestToolSpecs(of: chatReq.tools)
+    // What the model may call in this generation: the tools of the request, and
+    // nothing when it carries none (see `declaredToolSpecs`).
+    let declaredTools = declaredToolSpecs(of: chatReq.tools)
 
     // ── Acquire slot (concurrency limiter) ──
     await semaphore.wait()
@@ -2821,7 +2815,8 @@ func handleChatCompletion(
             }
             stream = try MLXLMCommon.generate(
                 input: LMInput(text: sliceText(lmInput.text, from: boundary)),
-                cache: cache, parameters: params, context: context, components: genComponents)
+                cache: cache, parameters: params, context: context, components: genComponents,
+                tools: declaredTools)
         } else if let boundary = rotatingBoundary {
             var start = await promptCache.restore(newTokens: promptTokens, into: cache) ?? 0
             if start >= promptLength {
@@ -2845,7 +2840,8 @@ func handleChatCompletion(
             }
             stream = try MLXLMCommon.generate(
                 input: LMInput(text: sliceText(lmInput.text, from: start)),
-                cache: cache, parameters: params, context: context, components: genComponents)
+                cache: cache, parameters: params, context: context, components: genComponents,
+                tools: declaredTools)
         } else if let draftRef = draftModelRef {
             // Speculative decoding path: draft model generates candidates, main model verifies.
             // Bypass prompt cache to avoid draft/main KV drift on partial-match restores.
@@ -2853,7 +2849,7 @@ func handleChatCompletion(
             print("[SwiftLM] Draft model type: \(type(of: draftRef.model))")
             stream = try MLXLMCommon.generate(
                 input: lmInput, cache: cache, parameters: params, context: context,
-                draftModel: draftRef.model, numDraftTokens: numDraftTokens
+                draftModel: draftRef.model, numDraftTokens: numDraftTokens, tools: declaredTools
             )
         } else if !skipPromptCache, let cachedCount = await promptCache.restore(newTokens: promptTokens, into: cache) {
             // Cache hit: KV state is pre-populated up to cachedCount tokens.
@@ -2869,24 +2865,26 @@ func handleChatCompletion(
             let trimmedInput = LMInput(text: sliceText(lmInput.text, from: startIndex))
             if config.mtp, let mtpCtx = mtpContext(main: context, assistant: mtpAssistant) {
                 stream = try MLXLMCommon.generateMTP(
-                    input: trimmedInput, cache: cache, parameters: params, context: mtpCtx, numMTPTokens: config.numMtpTokens
+                    input: trimmedInput, cache: cache, parameters: params, context: mtpCtx, numMTPTokens: config.numMtpTokens,
+                    tools: declaredTools
                 )
             } else {
                 stream = try MLXLMCommon.generate(
                     input: trimmedInput, cache: cache, parameters: params, context: context,
-                    components: genComponents
+                    components: genComponents, tools: declaredTools
                 )
             }
         } else {
             // Cache miss: process the full prompt.
             if config.mtp, let mtpCtx = mtpContext(main: context, assistant: mtpAssistant) {
                 stream = try MLXLMCommon.generateMTP(
-                    input: lmInput, cache: cache, parameters: params, context: mtpCtx, numMTPTokens: config.numMtpTokens
+                    input: lmInput, cache: cache, parameters: params, context: mtpCtx, numMTPTokens: config.numMtpTokens,
+                    tools: declaredTools
                 )
             } else {
                 stream = try MLXLMCommon.generate(
                     input: lmInput, cache: cache, parameters: params, context: context,
-                    components: genComponents
+                    components: genComponents, tools: declaredTools
                 )
             }
         }
@@ -3743,13 +3741,14 @@ func handleTextCompletion(
         // happens AFTER the response headers are on the wire (same rationale as
         // the chat path — no silent-prefill idle timeout).
         return handleTextStreaming(
-            startGeneration: { try await container.generate(input: lmInput, parameters: params) },
+            // A raw completion offers no tools, so nothing it writes is a tool call.
+            startGeneration: { try await container.generate(input: lmInput, parameters: params, tools: []) },
             modelId: modelId, stopSequences: stopSequences,
             promptTokenCount: promptTokenCount, slot: slot, stats: stats,
             genStart: genStart, emitPrefillProgress: emitPrefillProgress
         )
     } else {
-        let stream = try await container.generate(input: lmInput, parameters: params)
+        let stream = try await container.generate(input: lmInput, parameters: params, tools: [])
         return try await handleTextNonStreaming(
             stream: stream, modelId: modelId, stopSequences: stopSequences,
             promptTokenCount: promptTokenCount, slot: slot, stats: stats, genStart: genStart
@@ -4506,6 +4505,31 @@ func sseTextChunk(modelId: String, text: String, finishReason: String?) -> Strin
     ]
     let data = try! JSONSerialization.data(withJSONObject: chunk)
     return "data: \(String(data: data, encoding: .utf8)!)\r\n\r\n"
+}
+
+/// The `tools` of a chat request as the chat template and the tool-call parser take them
+/// (`nil` when the request has none).
+func requestToolSpecs(of tools: [ChatCompletionRequest.ToolDef]?) -> [[String: any Sendable]]? {
+    tools?.map { tool in
+        var spec: [String: any Sendable] = ["type": tool.type]
+        var fn: [String: any Sendable] = ["name": tool.function.name]
+        if let desc = tool.function.description { fn["description"] = desc }
+        if let params = tool.function.parameters {
+            fn["parameters"] = params.mapValues { $0.value }
+        }
+        spec["function"] = fn
+        return spec
+    }
+}
+
+/// The tools a generation may call: those of the request, and none when it carries none.
+///
+/// The parser authorizes and types a call by this list. `nil` is not "no tools" to it: it
+/// accepts any function name and reads every argument as text, so passing nothing both
+/// turned a plain JSON answer with a `name` key into a tool call on a Llama-format model
+/// and returned integer/boolean arguments as strings.
+func declaredToolSpecs(of tools: [ChatCompletionRequest.ToolDef]?) -> [[String: any Sendable]] {
+    requestToolSpecs(of: tools) ?? []
 }
 
 func serializeToolCallArgs(_ args: [String: JSONValue]) -> String {
